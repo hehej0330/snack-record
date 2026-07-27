@@ -230,6 +230,9 @@ static NSString *const TranscriptionModeStandard = @"standard";
 @property(nonatomic) BOOL systemAudioWriterStarted;
 @property(nonatomic) BOOL recordingMeetingAudio;
 @property(nonatomic) BOOL finalizingMeetingAudio;
+@property(nonatomic) BOOL mixingMeetingAudio;
+@property(nonatomic) BOOL startingRecording;
+@property(nonatomic) BOOL stoppingRecording;
 @property(nonatomic, strong) NSURL *recordingURL;
 @property(nonatomic, strong) NSDate *recordingStartDate;
 @property(nonatomic, strong) id<NSObject> recordingActivity;
@@ -674,30 +677,38 @@ static NSString *const TranscriptionModeStandard = @"standard";
 - (void)toggleRecording:(id)sender { [self toggleRecording]; }
 
 - (void)toggleRecording {
+    if (self.startingRecording || self.stoppingRecording || self.finalizingMeetingAudio) return;
     if (self.audioEngine.isRunning) {
         [self stopRecording];
-    } else if (!self.finalizingMeetingAudio) {
+    } else {
         [self startRecording];
     }
 }
 
 - (void)startRecordingIfNeeded {
-    if (!self.audioEngine.isRunning && !self.finalizingMeetingAudio) {
+    if (!self.audioEngine.isRunning && !self.startingRecording &&
+        !self.stoppingRecording && !self.finalizingMeetingAudio) {
         [self startRecording];
     }
 }
 
 - (void)stopRecordingIfNeeded {
-    if (self.audioEngine.isRunning) {
+    if (self.audioEngine.isRunning && !self.stoppingRecording && !self.finalizingMeetingAudio) {
         [self stopRecording];
     }
 }
 
 - (void)startRecording {
+    if (self.startingRecording || self.stoppingRecording ||
+        self.finalizingMeetingAudio || self.audioEngine.isRunning) return;
+    self.startingRecording = YES;
+    self.recordButton.enabled = NO;
     __weak typeof(self) weakSelf = self;
     [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!granted) {
+                weakSelf.startingRecording = NO;
+                weakSelf.recordButton.enabled = YES;
                 weakSelf.waitingForMicrophonePermission = YES;
                 [weakSelf renderState:TranscriptionStateFailed message:[weakSelf english:@"Allow microphone access in System Settings" chinese:@"请在系统设置中允许麦克风访问"]];
                 return;
@@ -718,6 +729,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
                                                  completionHandler:^(SCShareableContent *content, NSError *contentError) {
         if (contentError || content.displays.count == 0) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                weakSelf.startingRecording = NO;
                 weakSelf.recordButton.enabled = YES;
                 [weakSelf renderState:TranscriptionStateFailed message:[weakSelf english:@"Allow screen and system audio recording, then try again" chinese:@"请允许屏幕与系统音频录制后重试"]];
             });
@@ -792,6 +804,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
         self.systemAudioWriterInput = nil;
         self.systemAudioURL = nil;
         self.recordingMeetingAudio = NO;
+        self.startingRecording = NO;
         self.recordButton.enabled = YES;
         [self renderState:TranscriptionStateFailed message:message];
     });
@@ -831,6 +844,8 @@ static NSString *const TranscriptionModeStandard = @"standard";
     NSURL *directory = [NSFileManager.defaultManager.temporaryDirectory URLByAppendingPathComponent:@"SnackRecord" isDirectory:YES];
     [NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES attributes:nil error:&error];
     if (error) {
+        self.startingRecording = NO;
+        self.recordButton.enabled = YES;
         [self renderState:TranscriptionStateFailed message:[self english:@"Unable to create a temporary recording file" chinese:@"无法创建临时录音文件"]];
         return;
     }
@@ -840,6 +855,8 @@ static NSString *const TranscriptionModeStandard = @"standard";
     AVAudioFormat *format = [input outputFormatForBus:0];
     self.audioFile = [[AVAudioFile alloc] initForWriting:self.recordingURL settings:format.settings commonFormat:format.commonFormat interleaved:format.isInterleaved error:&error];
     if (error || !self.audioFile) {
+        self.startingRecording = NO;
+        self.recordButton.enabled = YES;
         [self renderState:TranscriptionStateFailed message:[self english:@"Unable to prepare recording" chinese:@"无法准备录音"]];
         return;
     }
@@ -859,15 +876,22 @@ static NSString *const TranscriptionModeStandard = @"standard";
     [self.audioEngine prepare];
     if (![self.audioEngine startAndReturnError:&error]) {
         [input removeTapOnBus:0];
+        self.startingRecording = NO;
+        self.recordButton.enabled = YES;
         [self renderState:TranscriptionStateFailed message:[self english:@"Unable to start recording" chinese:@"无法开始录音"]];
         return;
     }
     self.recordingActivity = SnackRecordBeginRecordingActivity((id<SnackRecordingActivityManaging>)NSProcessInfo.processInfo);
+    self.startingRecording = NO;
+    self.recordButton.enabled = YES;
     self.recordingStartDate = NSDate.date;
     [self renderState:TranscriptionStateRecording message:nil];
 }
 
 - (void)stopRecording {
+    if (self.stoppingRecording || self.finalizingMeetingAudio) return;
+    self.stoppingRecording = YES;
+    self.recordButton.enabled = NO;
     NSURL *microphoneURL = self.recordingURL;
     NSDate *startDate = self.recordingStartDate ?: NSDate.date;
     BOOL wasMeetingRecording = self.recordingMeetingAudio;
@@ -877,6 +901,8 @@ static NSString *const TranscriptionModeStandard = @"standard";
     [self.audioEngine stop];
     self.audioFile = nil;
     if (!microphoneURL) {
+        self.stoppingRecording = NO;
+        self.recordButton.enabled = YES;
         [self renderState:TranscriptionStateFailed message:[self english:@"Recording file was not found" chinese:@"未找到录音文件"]];
         return;
     }
@@ -885,6 +911,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
     self.recordingStartDate = nil;
     if (wasMeetingRecording && self.screenStream) {
         self.finalizingMeetingAudio = YES;
+        self.mixingMeetingAudio = NO;
         [self renderState:TranscriptionStateReady message:[self english:@"Preparing meeting audio…" chinese:@"正在整理会议音频…"]];
         self.recordButton.enabled = NO;
         __weak typeof(self) weakSelf = self;
@@ -893,14 +920,24 @@ static NSString *const TranscriptionModeStandard = @"standard";
                 [weakSelf finishSystemAudioRecordingWithMicrophoneURL:microphoneURL startDate:startDate];
             });
         }];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!weakSelf.finalizingMeetingAudio || weakSelf.mixingMeetingAudio) return;
+            [weakSelf.systemAudioWriter cancelWriting];
+            [weakSelf finishMeetingPreparationWithURL:microphoneURL
+                                            startDate:startDate
+                                              message:[weakSelf english:@"System audio finalization timed out; microphone audio was saved"
+                                                                chinese:@"系统音频收尾超时，已保存麦克风录音"]];
+        });
         return;
     }
 
     self.recordingMeetingAudio = NO;
     [self enqueueRecordingURL:microphoneURL startDate:startDate suggestedFilename:nil];
+    [self unlockRecordingControlAfterDelay];
 }
 
 - (void)finishSystemAudioRecordingWithMicrophoneURL:(NSURL *)microphoneURL startDate:(NSDate *)startDate {
+    if (!self.finalizingMeetingAudio) return;
     AVAssetWriter *writer = self.systemAudioWriter;
     if (!self.systemAudioWriterStarted || writer.status != AVAssetWriterStatusWriting) {
         [writer cancelWriting];
@@ -913,11 +950,14 @@ static NSString *const TranscriptionModeStandard = @"standard";
     [self.systemAudioWriterInput markAsFinished];
     __weak typeof(self) weakSelf = self;
     [writer finishWritingWithCompletionHandler:^{
+        if (!weakSelf.finalizingMeetingAudio) return;
+        weakSelf.mixingMeetingAudio = YES;
         [weakSelf mixMicrophoneURL:microphoneURL systemURL:weakSelf.systemAudioURL startDate:startDate];
     }];
 }
 
 - (void)mixMicrophoneURL:(NSURL *)microphoneURL systemURL:(NSURL *)systemURL startDate:(NSDate *)startDate {
+    if (!self.finalizingMeetingAudio || !systemURL) return;
     NSURL *combinedURL = [[microphoneURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:[NSString stringWithFormat:@"meeting-%@.wav", NSUUID.UUID.UUIDString]];
     NSString *ffmpegPath = FFmpegExecutablePath();
     if (!ffmpegPath) {
@@ -946,16 +986,27 @@ static NSString *const TranscriptionModeStandard = @"standard";
 }
 
 - (void)finishMeetingPreparationWithURL:(NSURL *)recordingURL startDate:(NSDate *)startDate message:(NSString *)message {
+    if (!self.finalizingMeetingAudio) return;
     self.screenStream = nil;
     self.systemAudioWriter = nil;
     self.systemAudioWriterInput = nil;
     self.systemAudioURL = nil;
     self.systemAudioWriterStarted = NO;
     self.recordingMeetingAudio = NO;
+    self.mixingMeetingAudio = NO;
     self.finalizingMeetingAudio = NO;
-    self.recordButton.enabled = YES;
     [self enqueueRecordingURL:recordingURL startDate:startDate suggestedFilename:nil];
     [self renderState:TranscriptionStateReady message:message];
+    [self unlockRecordingControlAfterDelay];
+}
+
+- (void)unlockRecordingControlAfterDelay {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (weakSelf.audioEngine.isRunning || weakSelf.finalizingMeetingAudio) return;
+        weakSelf.stoppingRecording = NO;
+        weakSelf.recordButton.enabled = YES;
+    });
 }
 
 - (void)enqueueRecordingURL:(NSURL *)recordingURL startDate:(NSDate *)startDate suggestedFilename:(NSString *)suggestedFilename {
