@@ -688,7 +688,9 @@ static NSString *const TranscriptionModeStandard = @"standard";
         [self cancelPendingRecordingStart];
         return;
     }
-    if (self.audioEngine.isRunning) {
+    BOOL hasActiveRecording = self.audioEngine.isRunning || self.recordingMeetingAudio ||
+        self.screenStream != nil || self.recordingURL != nil;
+    if (hasActiveRecording) {
         [self stopRecording];
     } else {
         [self startRecording];
@@ -707,7 +709,9 @@ static NSString *const TranscriptionModeStandard = @"standard";
         [self cancelPendingRecordingStart];
         return;
     }
-    if (self.audioEngine.isRunning && !self.stoppingRecording && !self.finalizingMeetingAudio) {
+    BOOL hasActiveRecording = self.audioEngine.isRunning || self.recordingMeetingAudio ||
+        self.screenStream != nil || self.recordingURL != nil;
+    if (hasActiveRecording && !self.stoppingRecording && !self.finalizingMeetingAudio) {
         [self stopRecording];
     }
 }
@@ -1987,6 +1991,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
 - (NSDictionary<NSString *, NSString *> *)monitoredApplications {
     return @{
         @"com.tencent.wwmapp": @"企业微信",
+        @"com.tencent.WeWorkMac": @"企业微信",
         @"com.electron.lark": @"飞书",
         @"com.bytedance.ee.lark": @"飞书",
         @"com.tencent.meeting": @"腾讯会议",
@@ -1996,14 +2001,19 @@ static NSString *const TranscriptionModeStandard = @"standard";
 }
 
 - (BOOL)isWeComBundleIdentifier:(NSString *)bundleIdentifier {
-    return [bundleIdentifier isEqualToString:@"com.tencent.wwmapp"];
+    return [bundleIdentifier isEqualToString:@"com.tencent.wwmapp"] ||
+        [bundleIdentifier isEqualToString:@"com.tencent.WeWorkMac"];
 }
 
 - (BOOL)isDedicatedMeetingBundleIdentifier:(NSString *)bundleIdentifier {
-    return [bundleIdentifier isEqualToString:@"com.tencent.wwmapp"] ||
-        [bundleIdentifier isEqualToString:@"us.zoom.xos"] ||
+    return [bundleIdentifier isEqualToString:@"us.zoom.xos"] ||
         [bundleIdentifier isEqualToString:@"com.tencent.meeting"] ||
         [bundleIdentifier isEqualToString:@"com.tencent.wemeet"];
+}
+
+- (BOOL)isFeishuBundleIdentifier:(NSString *)bundleIdentifier {
+    return [bundleIdentifier isEqualToString:@"com.electron.lark"] ||
+        [bundleIdentifier isEqualToString:@"com.bytedance.ee.lark"];
 }
 
 - (BOOL)isChineseInterface {
@@ -2088,7 +2098,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
         [self hideReminder];
         return;
     }
-    self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:8.0 target:self selector:@selector(pollForMeeting:) userInfo:nil repeats:YES];
+    self.pollTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 target:self selector:@selector(pollForMeeting:) userInfo:nil repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:self.pollTimer forMode:NSRunLoopCommonModes];
     [self pollForMeeting:nil];
 }
@@ -2170,11 +2180,12 @@ static NSString *const TranscriptionModeStandard = @"standard";
     for (NSString *keyword in keywords) {
         if ([title containsString:keyword]) return YES;
     }
-    BOOL feishu = [bundleIdentifier isEqualToString:@"com.electron.lark"] ||
-        [bundleIdentifier isEqualToString:@"com.bytedance.ee.lark"];
-    if (feishu) return NO;
     CGFloat width = CGRectGetWidth(window.frame);
     CGFloat height = CGRectGetHeight(window.frame);
+    if ([self isFeishuBundleIdentifier:bundleIdentifier]) {
+        NSString *frontmostBundleIdentifier = NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier;
+        return [frontmostBundleIdentifier isEqualToString:bundleIdentifier] && width >= 420 && height >= 260;
+    }
     if ([self isDedicatedMeetingBundleIdentifier:bundleIdentifier]) return width >= 160 && height >= 100;
     return NO;
 }
@@ -2336,7 +2347,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
         } else {
             self.activeAudioSeconds = MAX(0, self.activeAudioSeconds - duration * 0.5);
         }
-        if (self.activeAudioSeconds >= 3.0) [self showReminder];
+        if (self.activeAudioSeconds >= 1.5) [self showReminder];
     });
 }
 
