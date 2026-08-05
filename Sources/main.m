@@ -257,6 +257,8 @@ static NSString *const TranscriptionModeStandard = @"standard";
 - (void)startRecordingIfNeeded;
 - (void)stopRecordingIfNeeded;
 - (void)beginAudioCaptureForGeneration:(NSUInteger)generation;
+- (void)prepareFreshAudioEngine;
+- (void)removeMicrophoneTapIfInstalled;
 - (void)cancelPendingRecordingStart;
 - (void)refreshMicrophoneAuthorization;
 - (BOOL)hasActiveWork;
@@ -880,13 +882,9 @@ static NSString *const TranscriptionModeStandard = @"standard";
         return;
     }
 
+    [self prepareFreshAudioEngine];
     self.recordingURL = [directory URLByAppendingPathComponent:[NSString stringWithFormat:@"recording-%@.wav", NSUUID.UUID.UUIDString]];
     AVAudioInputNode *input = self.audioEngine.inputNode;
-    if (self.microphoneTapInstalled) {
-        [input removeTapOnBus:0];
-        self.microphoneTapInstalled = NO;
-    }
-    [self.audioEngine reset];
     AVAudioFormat *format = [input outputFormatForBus:0];
     self.audioFile = [[AVAudioFile alloc] initForWriting:self.recordingURL settings:format.settings commonFormat:format.commonFormat interleaved:format.isInterleaved error:&error];
     if (error || !self.audioFile) {
@@ -897,7 +895,6 @@ static NSString *const TranscriptionModeStandard = @"standard";
 
     __weak typeof(self) weakSelf = self;
     @try {
-        [input removeTapOnBus:0];
         [input installTapOnBus:0 bufferSize:2048 format:format block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
             if (weakSelf.shuttingDown || generation != weakSelf.recordingSessionGeneration) return;
             NSError *writeError = nil;
@@ -910,8 +907,9 @@ static NSString *const TranscriptionModeStandard = @"standard";
         }];
         self.microphoneTapInstalled = YES;
     } @catch (NSException *exception) {
+        NSLog(@"Snack Record microphone tap setup failed: %@", exception.reason);
         [self cancelPendingRecordingStart];
-        [self renderState:TranscriptionStateFailed message:[self english:@"Microphone is still being released. Please try again." chinese:@"麦克风仍在释放，请稍后重试。"]];
+        [self renderState:TranscriptionStateFailed message:[self english:@"Unable to initialize the microphone. Please try again." chinese:@"无法初始化麦克风，请稍后重试。"]];
         return;
     }
 
@@ -928,6 +926,24 @@ static NSString *const TranscriptionModeStandard = @"standard";
     [self renderState:TranscriptionStateRecording message:nil];
 }
 
+- (void)prepareFreshAudioEngine {
+    [self removeMicrophoneTapIfInstalled];
+    [self.audioEngine stop];
+    [self.audioEngine reset];
+    self.audioFile = nil;
+    self.audioEngine = [[AVAudioEngine alloc] init];
+}
+
+- (void)removeMicrophoneTapIfInstalled {
+    if (!self.microphoneTapInstalled) return;
+    @try {
+        [self.audioEngine.inputNode removeTapOnBus:0];
+    } @catch (NSException *exception) {
+        NSLog(@"Snack Record microphone tap cleanup failed: %@", exception.reason);
+    }
+    self.microphoneTapInstalled = NO;
+}
+
 - (void)cancelPendingRecordingStart {
     self.recordingSessionGeneration += 1;
     self.startingRecording = NO;
@@ -935,8 +951,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
     self.recordButton.enabled = YES;
     SnackRecordEndRecordingActivity((id<SnackRecordingActivityManaging>)NSProcessInfo.processInfo, self.recordingActivity);
     self.recordingActivity = nil;
-    if (self.microphoneTapInstalled) [self.audioEngine.inputNode removeTapOnBus:0];
-    self.microphoneTapInstalled = NO;
+    [self removeMicrophoneTapIfInstalled];
     [self.audioEngine stop];
     [self.audioEngine reset];
     self.audioFile = nil;
@@ -963,8 +978,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
     BOOL wasMeetingRecording = self.recordingMeetingAudio;
     SnackRecordEndRecordingActivity((id<SnackRecordingActivityManaging>)NSProcessInfo.processInfo, self.recordingActivity);
     self.recordingActivity = nil;
-    if (self.microphoneTapInstalled) [self.audioEngine.inputNode removeTapOnBus:0];
-    self.microphoneTapInstalled = NO;
+    [self removeMicrophoneTapIfInstalled];
     [self.audioEngine stop];
     [self.audioEngine reset];
     self.audioFile = nil;
@@ -1875,8 +1889,7 @@ static NSString *const TranscriptionModeStandard = @"standard";
 
     SnackRecordEndRecordingActivity((id<SnackRecordingActivityManaging>)NSProcessInfo.processInfo, self.recordingActivity);
     self.recordingActivity = nil;
-    if (self.microphoneTapInstalled) [self.audioEngine.inputNode removeTapOnBus:0];
-    self.microphoneTapInstalled = NO;
+    [self removeMicrophoneTapIfInstalled];
     [self.audioEngine stop];
     [self.audioEngine reset];
     self.audioFile = nil;
